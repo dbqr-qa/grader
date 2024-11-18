@@ -19,6 +19,16 @@ PAGE_SIZE = 5
 app = Flask(__name__)
 CORS(app)
 
+def _get_branches() -> list:
+    path = join(DEFAULT_DATA_PATH, 'gold', 'branches')
+    branches = []
+
+    for branch in listdir(path):
+        if isdir(join(path, branch)):
+            branches.append(branch)
+    
+    return branches
+
 
 def _get_user_info(token: str) -> dict:
     users_path = join(DEFAULT_DATA_PATH, 'users')
@@ -49,25 +59,25 @@ def _get_stage(answers: dict) -> str:
 
 
 def _get_limit(username):
-    score_file = join(DEFAULT_DATA_PATH, 'users', username, 'scores.json')
+    branches = _get_branches()
+    remaining = SUBMISSION_LITMIT
     
-    if isfile(score_file):
-        with open(score_file) as reader:
-            scores = json.load(reader)
-            
-        now = datetime.datetime.now()
-        dformat = '%Y-%m-%d'
-        ref = now.strftime(dformat)
-        remaining = SUBMISSION_LITMIT
+    for branch in branches:
+        score_file = join(DEFAULT_DATA_PATH, 'scores', branch, f'{username}.json')
         
-        for score in scores:
-            if score['timestamp'].startswith(ref):
-                remaining -= 1
-        
-        return remaining
+        if isfile(score_file):
+            with open(score_file) as reader:
+                scores = json.load(reader)
+                
+            now = datetime.datetime.now()
+            dformat = '%Y-%m-%d'
+            ref = now.strftime(dformat)
+
+            for score in scores:
+                if score['timestamp'].startswith(ref):
+                    remaining -= 1
     
-    else:
-        return SUBMISSION_LITMIT
+    return remaining
 
 
 def _evaulate(answers: dict, labels: dict) -> float:
@@ -106,46 +116,50 @@ def status():
 @app.route('/dbqr-qa/leaderboard')
 def leaderboard():
     users_path = join(DEFAULT_DATA_PATH, 'users')
+    scores_path = join(DEFAULT_DATA_PATH, 'scores')
     data = {}
     
-    for stage in ('practice', 'training', 'test'):
-        users = []
-        
-        for user in listdir(users_path):
-            user_path = join(users_path, user)
-            account_file = join(user_path, 'account.json')
-            scores_file = join(user_path, 'scores.json')
+    for branch in _get_branches():
+        data[branch] = {}
+
+        for stage in ('practice', 'training', 'test'):
+            users = []
             
-            if not isfile(scores_file):
-                continue
+            for user in listdir(users_path):
+                user_path = join(users_path, user)
+                account_file = join(user_path, 'account.json')
+                scores_file = join(scores_path, branch, f'{user}.json')
+                
+                if not isfile(scores_file):
+                    continue
+                
+                with open(account_file) as reader:
+                    account = json.load(reader)
+                
+                with open(scores_file) as reader:
+                    history = json.load(reader)
+                
+                scores = []
+                
+                for record in history:
+                    if record['stage'].lower() == stage:
+                        scores.append(record)
+                        
+                if (len(scores)) == 0:
+                    continue
+                        
+                best = sorted(scores, key=lambda x: x['graderScore'], reverse=True)[0]
+                
+                users.append({
+                    'name': account['display'],
+                    'entries': len(scores),
+                    'graderScore': best['graderScore'],
+                    'gptScore': best['gptScore'],
+                    'humanScore': best['humanScore'],
+                    'last': scores[-1]['submitted']})
             
-            with open(account_file) as reader:
-                account = json.load(reader)
-            
-            with open(scores_file) as reader:
-                history = json.load(reader)
-            
-            scores = []
-            
-            for record in history:
-                if record['stage'].lower() == stage:
-                    scores.append(record)
-                    
-            if (len(scores)) == 0:
-                continue
-                    
-            best = sorted(scores, key=lambda x: x['graderScore'], reverse=True)[0]
-            
-            users.append({
-                'name': account['display'],
-                'entries': len(scores),
-                'graderScore': best['graderScore'],
-                'gptScore': best['gptScore'],
-                'humanScore': best['humanScore'],
-                'last': scores[-1]['submitted']})
-        
-        users = sorted(users, key=lambda x: x['graderScore'], reverse=True)
-        data[stage] = users
+            users = sorted(users, key=lambda x: x['graderScore'], reverse=True)
+            data[branch][stage] = users
     
     return jsonify({
         'status': 'ok',
@@ -171,6 +185,7 @@ def activate():
 @app.route('/dbqr-qa/history')
 def history():
     token = request.args.get('token', None)
+    branch = request.args.get('branch', 'master')
     page = request.args.get('page', 1)
     
     if isinstance(page, str):
@@ -190,7 +205,7 @@ def history():
         
     username = account['username']
         
-    score_file = join(DEFAULT_DATA_PATH, 'users', username, 'scores.json')
+    score_file = join(DEFAULT_DATA_PATH, 'scores', branch, f'{username}.json')
     
     if isfile(score_file):
         with open(score_file) as reader:
@@ -224,6 +239,7 @@ def history():
 @app.route('/dbqr-qa/submit', methods=['POST',])
 def submit():
     token = request.form.get('token', None)
+    branch = request.form.get('branch', 'master')
     
     account = _get_user_info(token)
     
@@ -261,9 +277,9 @@ def submit():
     timestamp = now.strftime(tformat)
     submitted = now.strftime(sformat)
     
-    path = join(DEFAULT_DATA_PATH, 'users', username, 'answers')
-    Path(path).mkdir(exist_ok=True, parents=True)
-    stored_file = join(path, f'{timestamp}.json')
+    answer_path = join(DEFAULT_DATA_PATH, 'answers', branch, username)
+    Path(answer_path).mkdir(exist_ok=True, parents=True)
+    stored_file = join(answer_path, f'{timestamp}.json')
     
     file.save(stored_file)
     
@@ -289,7 +305,7 @@ def submit():
             'error': 'stage_not_found',
             'message': 'The answers do not match any of stages (practice/training/test).'})
     
-    label_file = join(DEFAULT_DATA_PATH, 'gold', 'compiled', f'{stage}.json')
+    label_file = join(DEFAULT_DATA_PATH, 'gold', 'branches', branch, 'answers', f'{stage}.json')
     
     with open(label_file) as reader:
         labels = json.load(reader)
@@ -313,7 +329,10 @@ def submit():
             'error': 'missing_answers',
             'message': 'Missing answers for at least one of the conversations.'})
         
-    score_file = join(DEFAULT_DATA_PATH, 'users', username, 'scores.json')
+    score_path = join(DEFAULT_DATA_PATH, 'scores', branch)
+    score_file = join(score_path, f'{username}.json')
+
+    Path(score_path).mkdir(exist_ok=True, parents=True)
     
     if isfile(score_file):
         with open(score_file) as reader:
@@ -387,6 +406,7 @@ def limit():
 @app.route('/dbqr-qa/download')
 def download():
     token = request.args.get('token', None)
+    branch = request.args.get('branch', 'master')
     timestamp = request.args.get('timestamp', None)
     
     account = _get_user_info(token)
@@ -395,7 +415,8 @@ def download():
         return 'Invalid token.'
 
     username = account['username']
-    file = join(DEFAULT_DATA_PATH, 'users', username, 'answers', f'{timestamp}.json')
+    answer_path = join(DEFAULT_DATA_PATH, 'answers', branch, username)
+    file = join(answer_path, f'{timestamp}.json')
     
     if isfile(file):
         return send_file(file, as_attachment=True)
